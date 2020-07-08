@@ -21,17 +21,21 @@ TEST_MODULES = \
     hooks.so \
     blockonkeys.so \
     scan.so \
-    datatype.so
+    datatype.so \
+    auth.so
 
 .PHONY: all
 
 all: $(TEST_MODULES)
 
+32bit:
+	$(MAKE) CFLAGS="-m32" LDFLAGS="-melf_i386"
+
 %.xo: %.c ../../src/redismodule.h
 	$(CC) -I../../src $(CFLAGS) $(SHOBJ_CFLAGS) -fPIC -c $< -o $@
 
 %.so: %.xo
-	$(LD) -o $@ $< $(SHOBJ_LDFLAGS) $(LIBS) -lc
+	$(LD) -o $@ $< $(SHOBJ_LDFLAGS) $(LDFLAGS) $(LIBS) -lc
 
 .PHONY: clean
 

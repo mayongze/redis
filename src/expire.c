@@ -64,7 +64,7 @@ int activeExpireCycleTryExpire(redisDb *db, dictEntry *de, long long now) {
             dbSyncDelete(db,keyobj);
         notifyKeyspaceEvent(NOTIFY_EXPIRED,
             "expired",keyobj,db->id);
-        trackingInvalidateKey(keyobj);
+        trackingInvalidateKey(NULL,keyobj);
         decrRefCount(keyobj);
         server.stat_expiredkeys++;
         return 1;
@@ -203,8 +203,10 @@ void activeExpireCycle(int type) {
          * distribute the time evenly across DBs. */
         current_db++;
 
-        /* Continue to expire if at the end of the cycle more than 25%
-         * of the keys were expired. */
+        /* Continue to expire if at the end of the cycle there are still
+         * a big percentage of keys to expire, compared to the number of keys
+         * we scanned. The percentage, stored in config_cycle_acceptable_stale
+         * is not fixed, but depends on the Redis configured "expire effort". */
         do {
             unsigned long num, slots;
             long long now, ttl_sum;
@@ -305,8 +307,9 @@ void activeExpireCycle(int type) {
             }
             /* We don't repeat the cycle for the current database if there are
              * an acceptable amount of stale keys (logically expired but yet
-             * not reclained). */
-        } while ((expired*100/sampled) > config_cycle_acceptable_stale);
+             * not reclaimed). */
+        } while (sampled == 0 ||
+                 (expired*100/sampled) > config_cycle_acceptable_stale);
     }
 
     elapsed = ustime()-start;
@@ -516,14 +519,14 @@ void expireGenericCommand(client *c, long long basetime, int unit) {
         /* Replicate/AOF this as an explicit DEL or UNLINK. */
         aux = server.lazyfree_lazy_expire ? shared.unlink : shared.del;
         rewriteClientCommandVector(c,2,aux,key);
-        signalModifiedKey(c->db,key);
+        signalModifiedKey(c,c->db,key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"del",key,c->db->id);
         addReply(c, shared.cone);
         return;
     } else {
         setExpire(c,c->db,key,when);
         addReply(c,shared.cone);
-        signalModifiedKey(c->db,key);
+        signalModifiedKey(c,c->db,key);
         notifyKeyspaceEvent(NOTIFY_GENERIC,"expire",key,c->db->id);
         server.dirty++;
         return;
@@ -587,6 +590,7 @@ void pttlCommand(client *c) {
 void persistCommand(client *c) {
     if (lookupKeyWrite(c->db,c->argv[1])) {
         if (removeExpire(c->db,c->argv[1])) {
+            notifyKeyspaceEvent(NOTIFY_GENERIC,"persist",c->argv[1],c->db->id);
             addReply(c,shared.cone);
             server.dirty++;
         } else {
