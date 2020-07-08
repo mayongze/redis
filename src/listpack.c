@@ -773,13 +773,13 @@ unsigned char *lpSeek(unsigned char *lp, long index) {
          * is past the half of the listpack. */
         if (index > numele/2) {
             forward = 0;
-            /* Right to left scanning always expects a negative index. Convert
+            /* Left to right scanning always expects a negative index. Convert
              * our index to negative form. */
             index -= numele;
         }
     } else {
         /* If the listpack length is unspecified, for negative indexes we
-         * want to always scan right-to-left. */
+         * want to always scan left-to-right. */
         if (index < 0) forward = 0;
     }
 

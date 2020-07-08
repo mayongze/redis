@@ -94,7 +94,6 @@ static struct config {
     sds dbnumstr;
     char *tests;
     char *auth;
-    const char *user;
     int precision;
     int num_threads;
     struct benchmarkThread **threads;
@@ -259,10 +258,7 @@ static redisConfig *getRedisConfig(const char *ip, int port,
 
     if(config.auth) {
         void *authReply = NULL;
-        if (config.user == NULL)
-            redisAppendCommand(c, "AUTH %s", config.auth);
-        else
-            redisAppendCommand(c, "AUTH %s %s", config.user, config.auth);
+        redisAppendCommand(c, "AUTH %s", config.auth);
         if (REDIS_OK != redisGetReply(c, &authReply)) goto fail;
         if (reply) freeReplyObject(reply);
         reply = ((redisReply *) authReply);
@@ -279,7 +275,7 @@ static redisConfig *getRedisConfig(const char *ip, int port,
     for (; i < 2; i++) {
         int res = redisGetReply(c, &r);
         if (reply) freeReplyObject(reply);
-        reply = res == REDIS_OK ? ((redisReply *) r) : NULL;
+        reply = ((redisReply *) r);
         if (res != REDIS_OK || !r) goto fail;
         if (reply->type == REDIS_REPLY_ERROR) {
             fprintf(stderr, "ERROR: %s\n", reply->str);
@@ -303,7 +299,7 @@ fail:
     else fprintf(stderr, "%s\n", hostsocket);
     freeReplyObject(reply);
     redisFree(c);
-    freeRedisConfig(cfg);
+    zfree(cfg);
     return NULL;
 }
 static void freeRedisConfig(redisConfig *cfg) {
@@ -632,12 +628,7 @@ static client createClient(char *cmd, size_t len, client from, int thread_id) {
     c->prefix_pending = 0;
     if (config.auth) {
         char *buf = NULL;
-        int len;
-        if (config.user == NULL)
-            len = redisFormatCommand(&buf, "AUTH %s", config.auth);
-        else
-            len = redisFormatCommand(&buf, "AUTH %s %s",
-                                     config.user, config.auth);
+        int len = redisFormatCommand(&buf, "AUTH %s", config.auth);
         c->obuf = sdscatlen(c->obuf, buf, len);
         free(buf);
         c->prefix_pending++;
@@ -1278,17 +1269,6 @@ static void updateClusterSlotsConfiguration() {
     pthread_mutex_unlock(&config.is_updating_slots_mutex);
 }
 
-/* Generate random data for redis benchmark. See #7196. */
-static void genBenchmarkRandomData(char *data, int count) {
-    static uint32_t state = 1234;
-    int i = 0;
-
-    while (count--) {
-        state = (state*1103515245+12345);
-        data[i++] = '0'+((state>>16)&63);
-    }
-}
-
 /* Returns number of consumed options. */
 int parseOptions(int argc, const char **argv) {
     int i;
@@ -1319,9 +1299,6 @@ int parseOptions(int argc, const char **argv) {
         } else if (!strcmp(argv[i],"-a") ) {
             if (lastarg) goto invalid;
             config.auth = strdup(argv[++i]);
-        } else if (!strcmp(argv[i],"--user")) {
-            if (lastarg) goto invalid;
-            config.user = argv[++i];
         } else if (!strcmp(argv[i],"-d")) {
             if (lastarg) goto invalid;
             config.datasize = atoi(argv[++i]);
@@ -1408,7 +1385,6 @@ usage:
 " -p <port>          Server port (default 6379)\n"
 " -s <socket>        Server socket (overrides host and port)\n"
 " -a <password>      Password for Redis Auth\n"
-" --user <username>  Used to send ACL style 'AUTH username pass'. Needs -a.\n"
 " -c <clients>       Number of parallel connections (default 50)\n"
 " -n <requests>      Total number of requests (default 100000)\n"
 " -d <size>          Data size of SET/GET value in bytes (default 3)\n"
@@ -1643,7 +1619,7 @@ int main(int argc, const char **argv) {
     /* Run default benchmark suite. */
     data = zmalloc(config.datasize+1);
     do {
-        genBenchmarkRandomData(data, config.datasize);
+        memset(data,'x',config.datasize);
         data[config.datasize] = '\0';
 
         if (test_is_selected("ping_inline") || test_is_selected("ping"))

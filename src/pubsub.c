@@ -35,11 +35,7 @@ int clientSubscriptionsCount(client *c);
  * Pubsub client replies API
  *----------------------------------------------------------------------------*/
 
-/* Send a pubsub message of type "message" to the client.
- * Normally 'msg' is a Redis object containing the string to send as
- * message. However if the caller sets 'msg' as NULL, it will be able
- * to send a special message (for instance an Array type) by using the
- * addReply*() API family. */
+/* Send a pubsub message of type "message" to the client. */
 void addReplyPubsubMessage(client *c, robj *channel, robj *msg) {
     if (c->resp == 2)
         addReply(c,shared.mbulkhdr[3]);
@@ -47,7 +43,7 @@ void addReplyPubsubMessage(client *c, robj *channel, robj *msg) {
         addReplyPushLen(c,3);
     addReply(c,shared.messagebulk);
     addReplyBulk(c,channel);
-    if (msg) addReplyBulk(c,msg);
+    addReplyBulk(c,msg);
 }
 
 /* Send a pubsub message of type "pmessage" to the client. The difference
@@ -206,8 +202,6 @@ int pubsubUnsubscribeChannel(client *c, robj *channel, int notify) {
 
 /* Subscribe a client to a pattern. Returns 1 if the operation succeeded, or 0 if the client was already subscribed to that pattern. */
 int pubsubSubscribePattern(client *c, robj *pattern) {
-    dictEntry *de;
-    list *clients;
     int retval = 0;
 
     if (listSearchKey(c->pubsub_patterns,pattern) == NULL) {
@@ -219,16 +213,6 @@ int pubsubSubscribePattern(client *c, robj *pattern) {
         pat->pattern = getDecodedObject(pattern);
         pat->client = c;
         listAddNodeTail(server.pubsub_patterns,pat);
-        /* Add the client to the pattern -> list of clients hash table */
-        de = dictFind(server.pubsub_patterns_dict,pattern);
-        if (de == NULL) {
-            clients = listCreate();
-            dictAdd(server.pubsub_patterns_dict,pattern,clients);
-            incrRefCount(pattern);
-        } else {
-            clients = dictGetVal(de);
-        }
-        listAddNodeTail(clients,c);
     }
     /* Notify the client */
     addReplyPubsubPatSubscribed(c,pattern);
@@ -238,8 +222,6 @@ int pubsubSubscribePattern(client *c, robj *pattern) {
 /* Unsubscribe a client from a channel. Returns 1 if the operation succeeded, or
  * 0 if the client was not subscribed to the specified channel. */
 int pubsubUnsubscribePattern(client *c, robj *pattern, int notify) {
-    dictEntry *de;
-    list *clients;
     listNode *ln;
     pubsubPattern pat;
     int retval = 0;
@@ -252,18 +234,6 @@ int pubsubUnsubscribePattern(client *c, robj *pattern, int notify) {
         pat.pattern = pattern;
         ln = listSearchKey(server.pubsub_patterns,&pat);
         listDelNode(server.pubsub_patterns,ln);
-        /* Remove the client from the pattern -> clients list hash table */
-        de = dictFind(server.pubsub_patterns_dict,pattern);
-        serverAssertWithInfo(c,NULL,de != NULL);
-        clients = dictGetVal(de);
-        ln = listSearchKey(clients,c);
-        serverAssertWithInfo(c,NULL,ln != NULL);
-        listDelNode(clients,ln);
-        if (listLength(clients) == 0) {
-            /* Free the list and associated hash entry at all if this was
-             * the latest client. */
-            dictDelete(server.pubsub_patterns_dict,pattern);
-        }
     }
     /* Notify the client */
     if (notify) addReplyPubsubPatUnsubscribed(c,pattern);
@@ -310,7 +280,6 @@ int pubsubUnsubscribeAllPatterns(client *c, int notify) {
 int pubsubPublishMessage(robj *channel, robj *message) {
     int receivers = 0;
     dictEntry *de;
-    dictIterator *di;
     listNode *ln;
     listIter li;
 
@@ -329,26 +298,23 @@ int pubsubPublishMessage(robj *channel, robj *message) {
         }
     }
     /* Send to clients listening to matching channels */
-    di = dictGetIterator(server.pubsub_patterns_dict);
-    if (di) {
+    if (listLength(server.pubsub_patterns)) {
+        listRewind(server.pubsub_patterns,&li);
         channel = getDecodedObject(channel);
-        while((de = dictNext(di)) != NULL) {
-            robj *pattern = dictGetKey(de);
-            list *clients = dictGetVal(de);
-            if (!stringmatchlen((char*)pattern->ptr,
-                                sdslen(pattern->ptr),
-                                (char*)channel->ptr,
-                                sdslen(channel->ptr),0)) continue;
+        while ((ln = listNext(&li)) != NULL) {
+            pubsubPattern *pat = ln->value;
 
-            listRewind(clients,&li);
-            while ((ln = listNext(&li)) != NULL) {
-                client *c = listNodeValue(ln);
-                addReplyPubsubPatMessage(c,pattern,channel,message);
+            if (stringmatchlen((char*)pat->pattern->ptr,
+                                sdslen(pat->pattern->ptr),
+                                (char*)channel->ptr,
+                                sdslen(channel->ptr),0))
+            {
+                addReplyPubsubPatMessage(pat->client,
+                    pat->pattern,channel,message);
                 receivers++;
             }
         }
         decrRefCount(channel);
-        dictReleaseIterator(di);
     }
     return receivers;
 }

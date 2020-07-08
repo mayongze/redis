@@ -49,7 +49,6 @@
 #include <hiredis.h>
 #ifdef USE_OPENSSL
 #include <openssl/ssl.h>
-#include <openssl/err.h>
 #include <hiredis_ssl.h>
 #endif
 #include <sds.h> /* use sds.h from hiredis, so that only one set of sds functions will be present in the binary */
@@ -123,7 +122,6 @@
 #define CLUSTER_MANAGER_CMD_FLAG_COPY           1 << 7
 #define CLUSTER_MANAGER_CMD_FLAG_COLOR          1 << 8
 #define CLUSTER_MANAGER_CMD_FLAG_CHECK_OWNERS   1 << 9
-#define CLUSTER_MANAGER_CMD_FLAG_FIX_WITH_UNREACHABLE_MASTERS 1 << 10
 
 #define CLUSTER_MANAGER_OPT_GETFRIENDS  1 << 0
 #define CLUSTER_MANAGER_OPT_COLD        1 << 1
@@ -230,7 +228,6 @@ static struct config {
     int hotkeys;
     int stdinarg; /* get last arg from stdin. (-x option) */
     char *auth;
-    int askpass;
     char *user;
     int output; /* output mode, see OUTPUT_* defines */
     sds mb_delim;
@@ -699,8 +696,7 @@ static char *hintsCallback(const char *buf, int *color, int *bold) {
     for (i = 0; i < helpEntriesLen; i++) {
         if (!(helpEntries[i].type & CLI_HELP_COMMAND)) continue;
 
-        if (strcasecmp(argv[0],helpEntries[i].full) == 0 ||
-            strcasecmp(buf,helpEntries[i].full) == 0)
+        if (strcasecmp(argv[0],helpEntries[i].full) == 0)
         {
             *color = 90;
             *bold = 0;
@@ -1294,11 +1290,7 @@ static int cliSendCommand(int argc, char **argv, long repeat) {
         (argc == 3 && !strcasecmp(command,"latency") &&
                        !strcasecmp(argv[1],"graph")) ||
         (argc == 2 && !strcasecmp(command,"latency") &&
-                       !strcasecmp(argv[1],"doctor")) ||
-        /* Format PROXY INFO command for Redis Cluster Proxy:
-         * https://github.com/artix75/redis-cluster-proxy */
-        (argc >= 2 && !strcasecmp(command,"proxy") &&
-                       !strcasecmp(argv[1],"info")))
+                       !strcasecmp(argv[1],"doctor")))
     {
         output_raw = 1;
     }
@@ -1457,8 +1449,6 @@ static int parseOptions(int argc, char **argv) {
             config.dbnum = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--no-auth-warning")) {
             config.no_auth_warning = 1;
-        } else if (!strcmp(argv[i], "--askpass")) {
-            config.askpass = 1;
         } else if ((!strcmp(argv[i],"-a") || !strcmp(argv[i],"--pass"))
                    && !lastarg)
         {
@@ -1601,21 +1591,18 @@ static int parseOptions(int argc, char **argv) {
         } else if (!strcmp(argv[i],"--cluster-search-multiple-owners")) {
             config.cluster_manager_command.flags |=
                 CLUSTER_MANAGER_CMD_FLAG_CHECK_OWNERS;
-        } else if (!strcmp(argv[i],"--cluster-fix-with-unreachable-masters")) {
-            config.cluster_manager_command.flags |=
-                CLUSTER_MANAGER_CMD_FLAG_FIX_WITH_UNREACHABLE_MASTERS;
 #ifdef USE_OPENSSL
         } else if (!strcmp(argv[i],"--tls")) {
             config.tls = 1;
-        } else if (!strcmp(argv[i],"--sni") && !lastarg) {
+        } else if (!strcmp(argv[i],"--sni")) {
             config.sni = argv[++i];
-        } else if (!strcmp(argv[i],"--cacertdir") && !lastarg) {
+        } else if (!strcmp(argv[i],"--cacertdir")) {
             config.cacertdir = argv[++i];
-        } else if (!strcmp(argv[i],"--cacert") && !lastarg) {
+        } else if (!strcmp(argv[i],"--cacert")) {
             config.cacert = argv[++i];
-        } else if (!strcmp(argv[i],"--cert") && !lastarg) {
+        } else if (!strcmp(argv[i],"--cert")) {
             config.cert = argv[++i];
-        } else if (!strcmp(argv[i],"--key") && !lastarg) {
+        } else if (!strcmp(argv[i],"--key")) {
             config.key = argv[++i];
 #endif
         } else if (!strcmp(argv[i],"-v") || !strcmp(argv[i], "--version")) {
@@ -1700,11 +1687,8 @@ static void usage(void) {
 "                     You can also use the " REDIS_CLI_AUTH_ENV " environment\n"
 "                     variable to pass this password more safely\n"
 "                     (if both are used, this argument takes predecence).\n"
-"  --user <username>  Used to send ACL style 'AUTH username pass'. Needs -a.\n"
-"  --pass <password>  Alias of -a for consistency with the new --user option.\n"
-"  --askpass          Force user to input password with mask from STDIN.\n"
-"                     If this argument is used, '-a' and " REDIS_CLI_AUTH_ENV "\n"
-"                     environment variable will be ignored.\n"
+"  -user <username>   Used to send ACL style 'AUTH username pass'. Needs -a.\n"
+"  -pass <password>   Alias of -a for consistency with the new --user option.\n"
 "  -u <uri>           Server URI.\n"
 "  -r <repeat>        Execute specified command N times.\n"
 "  -i <interval>      When -r is used, waits <interval> seconds per command.\n"
@@ -1716,13 +1700,12 @@ static void usage(void) {
 "  -c                 Enable cluster mode (follow -ASK and -MOVED redirections).\n"
 #ifdef USE_OPENSSL
 "  --tls              Establish a secure TLS connection.\n"
-"  --sni <host>       Server name indication for TLS.\n"
-"  --cacert <file>    CA Certificate file to verify with.\n"
-"  --cacertdir <dir>  Directory where trusted CA certificates are stored.\n"
+"  --cacert           CA Certificate file to verify with.\n"
+"  --cacertdir        Directory where trusted CA certificates are stored.\n"
 "                     If neither cacert nor cacertdir are specified, the default\n"
 "                     system-wide trusted root certs configuration will apply.\n"
-"  --cert <file>      Client certificate to authenticate with.\n"
-"  --key <file>       Private key file to authenticate with.\n"
+"  --cert             Client certificate to authenticate with.\n"
+"  --key              Private key file to authenticate with.\n"
 #endif
 "  --raw              Use raw formatting for replies (default when STDOUT is\n"
 "                     not a tty).\n"
@@ -1797,14 +1780,7 @@ static void usage(void) {
     exit(1);
 }
 
-static int confirmWithYes(char *msg, int force) {
-    /* if force is true and --cluster-yes option is on,
-     * do not prompt for an answer */
-    if (force &&
-        (config.cluster_manager_command.flags & CLUSTER_MANAGER_CMD_FLAG_YES)) {
-        return 1;
-    }
-
+static int confirmWithYes(char *msg) {
     printf("%s (type 'yes' to accept): ", msg);
     fflush(stdout);
     char buf[4];
@@ -1969,20 +1945,8 @@ static void repl(void) {
                 }
             }
 
-            /* Won't save auth or acl setuser commands in history file */
-            int dangerous = 0;
-            if (argv && argc > 0) {
-                if (!strcasecmp(argv[skipargs], "auth")) {
-                    dangerous = 1;
-                } else if (skipargs+1 < argc &&
-                           !strcasecmp(argv[skipargs], "acl") &&
-                           !strcasecmp(argv[skipargs+1], "setuser"))
-                {
-                    dangerous = 1;
-                }
-            }
-
-            if (!dangerous) {
+            /* Won't save auth command in history file */
+            if (!(argv && argc > 0 && !strcasecmp(argv[0+skipargs], "auth"))) {
                 if (history) linenoiseHistoryAdd(line);
                 if (historyfile) linenoiseHistorySave(historyfile);
             }
@@ -2005,8 +1969,6 @@ static void repl(void) {
                     if (config.eval) {
                         config.eval_ldb = 1;
                         config.output = OUTPUT_RAW;
-                        sdsfreesplitres(argv,argc);
-                        linenoiseFree(line);
                         return; /* Return to evalMode to restart the session. */
                     } else {
                         printf("Use 'restart' only in Lua debugging mode.");
@@ -2158,7 +2120,6 @@ static int evalMode(int argc, char **argv) {
 static struct clusterManager {
     list *nodes;    /* List of nodes in the configuration. */
     list *errors;
-    int unreachable_masters;    /* Masters we are not able to reach. */
 } cluster_manager;
 
 /* Used by clusterManagerFixSlotsCoverage */
@@ -2301,7 +2262,7 @@ clusterManagerCommandDef clusterManagerCommands[] = {
      "search-multiple-owners"},
     {"info", clusterManagerCommandInfo, -1, "host:port", NULL},
     {"fix", clusterManagerCommandFix, -1, "host:port",
-     "search-multiple-owners,fix-with-unreachable-masters"},
+     "search-multiple-owners"},
     {"reshard", clusterManagerCommandReshard, -1, "host:port",
      "from <arg>,to <arg>,slots <arg>,yes,timeout <arg>,pipeline <arg>,"
      "replace"},
@@ -3423,7 +3384,6 @@ static redisReply *clusterManagerMigrateKeysInReply(clusterManagerNode *source,
     size_t *argv_len = NULL;
     int c = (replace ? 8 : 7);
     if (config.auth) c += 2;
-    if (config.user) c += 1;
     size_t argc = c + reply->elements;
     size_t i, offset = 6; // Keys Offset
     argv = zcalloc(argc * sizeof(char *));
@@ -3450,24 +3410,12 @@ static redisReply *clusterManagerMigrateKeysInReply(clusterManagerNode *source,
         offset++;
     }
     if (config.auth) {
-        if (config.user) {
-            argv[offset] = "AUTH2";
-            argv_len[offset] = 5;
-            offset++;
-            argv[offset] = config.user;
-            argv_len[offset] = strlen(config.user);
-            offset++;
-            argv[offset] = config.auth;
-            argv_len[offset] = strlen(config.auth);
-            offset++;
-        } else {
-            argv[offset] = "AUTH";
-            argv_len[offset] = 4;
-            offset++;
-            argv[offset] = config.auth;
-            argv_len[offset] = strlen(config.auth);
-            offset++;
-        }
+        argv[offset] = "AUTH";
+        argv_len[offset] = 4;
+        offset++;
+        argv[offset] = config.auth;
+        argv_len[offset] = strlen(config.auth);
+        offset++;
     }
     argv[offset] = "KEYS";
     argv_len[offset] = 4;
@@ -4039,9 +3987,7 @@ static int clusterManagerLoadInfoFromNode(clusterManagerNode *node, int opts) {
                 if (friend->flags & (CLUSTER_MANAGER_FLAG_NOADDR |
                                      CLUSTER_MANAGER_FLAG_DISCONNECT |
                                      CLUSTER_MANAGER_FLAG_FAIL))
-                {
                     goto invalid_friend;
-                }
                 listAddNodeTail(cluster_manager.nodes, friend);
             } else {
                 clusterManagerLogErr("[ERR] Unable to load info for "
@@ -4051,8 +3997,6 @@ static int clusterManagerLoadInfoFromNode(clusterManagerNode *node, int opts) {
             }
             continue;
 invalid_friend:
-            if (!(friend->flags & CLUSTER_MANAGER_FLAG_SLAVE))
-                cluster_manager.unreachable_masters++;
             freeClusterManagerNode(friend);
         }
         listRelease(node->friends);
@@ -4325,18 +4269,17 @@ static int clusterManagerGetCoveredSlots(char *all_slots) {
 }
 
 static void clusterManagerPrintSlotsList(list *slots) {
-    clusterManagerNode n = {0};
     listIter li;
     listNode *ln;
     listRewind(slots, &li);
+    sds first = NULL;
     while ((ln = listNext(&li)) != NULL) {
-        int slot = atoi(ln->value);
-        if (slot >= 0 && slot < CLUSTER_MANAGER_SLOTS)
-            n.slots[slot] = 1;
+        sds slot = ln->value;
+        if (!first) first = slot;
+        else printf(", ");
+        printf("%s", slot);
     }
-    sds nodeslist = clusterManagerNodeSlotsString(&n);
-    printf("%s\n", nodeslist);
-    sdsfree(nodeslist);
+    printf("\n");
 }
 
 /* Return the node, among 'nodes' with the greatest number of keys
@@ -4426,21 +4369,18 @@ static clusterManagerNode *clusterManagerNodeMasterRandom() {
 }
 
 static int clusterManagerFixSlotsCoverage(char *all_slots) {
-    int force_fix = config.cluster_manager_command.flags &
-                    CLUSTER_MANAGER_CMD_FLAG_FIX_WITH_UNREACHABLE_MASTERS;
-
-    if (cluster_manager.unreachable_masters > 0 && !force_fix) {
-        clusterManagerLogWarn("*** Fixing slots coverage with %d unreachable masters is dangerous: redis-cli will assume that slots about masters that are not reachable are not covered, and will try to reassign them to the reachable nodes. This can cause data loss and is rarely what you want to do. If you really want to proceed use the --cluster-fix-with-unreachable-masters option.\n", cluster_manager.unreachable_masters);
-        exit(1);
-    }
-
     int i, fixed = 0;
     list *none = NULL, *single = NULL, *multi = NULL;
     clusterManagerLogInfo(">>> Fixing slots coverage...\n");
+    printf("List of not covered slots: \n");
+    int uncovered_count = 0;
+    sds log = sdsempty();
     for (i = 0; i < CLUSTER_MANAGER_SLOTS; i++) {
         int covered = all_slots[i];
         if (!covered) {
-            sds slot = sdsfromlonglong((long long) i);
+            sds key = sdsfromlonglong((long long) i);
+            if (uncovered_count++ > 0) printf(",");
+            printf("%s", (char *) key);
             list *slot_nodes = listCreate();
             sds slot_nodes_str = sdsempty();
             listIter li;
@@ -4467,11 +4407,13 @@ static int clusterManagerFixSlotsCoverage(char *all_slots) {
                 }
                 freeReplyObject(reply);
             }
+            log = sdscatfmt(log, "\nSlot %S has keys in %u nodes: %S",
+                            key, listLength(slot_nodes), slot_nodes_str);
             sdsfree(slot_nodes_str);
-            dictAdd(clusterManagerUncoveredSlots, slot, slot_nodes);
+            dictAdd(clusterManagerUncoveredSlots, key, slot_nodes);
         }
     }
-
+    printf("\n%s\n", log);
     /* For every slot, take action depending on the actual condition:
      * 1) No node has keys for this slot.
      * 2) A single node has keys for this slot.
@@ -4492,16 +4434,12 @@ static int clusterManagerFixSlotsCoverage(char *all_slots) {
     }
     dictReleaseIterator(iter);
 
-    /* we want explicit manual confirmation from users for all the fix cases */
-    int force = 0;
-
     /*  Handle case "1": keys in no node. */
     if (listLength(none) > 0) {
         printf("The following uncovered slots have no keys "
                "across the cluster:\n");
         clusterManagerPrintSlotsList(none);
-        if (confirmWithYes("Fix these slots by covering with a random node?",
-                           force)) {
+        if (confirmWithYes("Fix these slots by covering with a random node?")){
             listIter li;
             listNode *ln;
             listRewind(none, &li);
@@ -4527,8 +4465,7 @@ static int clusterManagerFixSlotsCoverage(char *all_slots) {
     if (listLength(single) > 0) {
         printf("The following uncovered slots have keys in just one node:\n");
         clusterManagerPrintSlotsList(single);
-        if (confirmWithYes("Fix these slots by covering with those nodes?",
-                           force)) {
+        if (confirmWithYes("Fix these slots by covering with those nodes?")){
             listIter li;
             listNode *ln;
             listRewind(single, &li);
@@ -4560,7 +4497,7 @@ static int clusterManagerFixSlotsCoverage(char *all_slots) {
         printf("The following uncovered slots have keys in multiple nodes:\n");
         clusterManagerPrintSlotsList(multi);
         if (confirmWithYes("Fix these slots by moving keys "
-                           "into a single node?", force)) {
+                           "into a single node?")) {
             listIter li;
             listNode *ln;
             listRewind(multi, &li);
@@ -4618,6 +4555,7 @@ static int clusterManagerFixSlotsCoverage(char *all_slots) {
         }
     }
 cleanup:
+    sdsfree(log);
     if (none) listRelease(none);
     if (single) listRelease(single);
     if (multi) listRelease(multi);
@@ -4628,38 +4566,24 @@ cleanup:
  * more nodes. This function fixes this condition by migrating keys where
  * it seems more sensible. */
 static int clusterManagerFixOpenSlot(int slot) {
-    int force_fix = config.cluster_manager_command.flags &
-                    CLUSTER_MANAGER_CMD_FLAG_FIX_WITH_UNREACHABLE_MASTERS;
-
-    if (cluster_manager.unreachable_masters > 0 && !force_fix) {
-        clusterManagerLogWarn("*** Fixing open slots with %d unreachable masters is dangerous: redis-cli will assume that slots about masters that are not reachable are not covered, and will try to reassign them to the reachable nodes. This can cause data loss and is rarely what you want to do. If you really want to proceed use the --cluster-fix-with-unreachable-masters option.\n", cluster_manager.unreachable_masters);
-        exit(1);
-    }
-
     clusterManagerLogInfo(">>> Fixing open slot %d\n", slot);
     /* Try to obtain the current slot owner, according to the current
      * nodes configuration. */
     int success = 1;
-    list *owners = listCreate();    /* List of nodes claiming some ownership.
-                                       it could be stating in the configuration
-                                       to have the node ownership, or just
-                                       holding keys for such slot. */
+    list *owners = listCreate();
     list *migrating = listCreate();
     list *importing = listCreate();
     sds migrating_str = sdsempty();
     sds importing_str = sdsempty();
-    clusterManagerNode *owner = NULL; /* The obvious slot owner if any. */
-
-    /* Iterate all the nodes, looking for potential owners of this slot. */
+    clusterManagerNode *owner = NULL;
     listIter li;
     listNode *ln;
     listRewind(cluster_manager.nodes, &li);
     while ((ln = listNext(&li)) != NULL) {
         clusterManagerNode *n = ln->value;
         if (n->flags & CLUSTER_MANAGER_FLAG_SLAVE) continue;
-        if (n->slots[slot]) {
-            listAddNodeTail(owners, n);
-        } else {
+        if (n->slots[slot]) listAddNodeTail(owners, n);
+        else {
             redisReply *r = CLUSTER_MANAGER_COMMAND(n,
                 "CLUSTER COUNTKEYSINSLOT %d", slot);
             success = clusterManagerCheckRedisReply(n, r, NULL);
@@ -4673,14 +4597,7 @@ static int clusterManagerFixOpenSlot(int slot) {
             if (!success) goto cleanup;
         }
     }
-
-    /* If we have only a single potential owner for this slot,
-     * set it as "owner". */
     if (listLength(owners) == 1) owner = listFirst(owners)->value;
-
-    /* Scan the list of nodes again, in order to populate the
-     * list of nodes in importing or migrating state for
-     * this slot. */
     listRewind(cluster_manager.nodes, &li);
     while ((ln = listNext(&li)) != NULL) {
         clusterManagerNode *n = ln->value;
@@ -4712,7 +4629,6 @@ static int clusterManagerFixOpenSlot(int slot) {
                 }
             }
         }
-
         /* If the node is neither migrating nor importing and it's not
          * the owner, then is added to the importing list in case
          * it has keys in the slot. */
@@ -4737,12 +4653,11 @@ static int clusterManagerFixOpenSlot(int slot) {
         printf("Set as migrating in: %s\n", migrating_str);
     if (sdslen(importing_str) > 0)
         printf("Set as importing in: %s\n", importing_str);
-
     /* If there is no slot owner, set as owner the node with the biggest
      * number of keys, among the set of migrating / importing nodes. */
     if (owner == NULL) {
-        clusterManagerLogInfo(">>> No single clear owner for the slot, "
-                              "selecting an owner by # of keys...\n");
+        clusterManagerLogInfo(">>> Nobody claims ownership, "
+                              "selecting an owner...\n");
         owner = clusterManagerGetNodeWithMostKeysInSlot(cluster_manager.nodes,
                                                         slot, NULL);
         // If we still don't have an owner, we can't fix it.
@@ -4773,7 +4688,6 @@ static int clusterManagerFixOpenSlot(int slot) {
         clusterManagerRemoveNodeFromList(migrating, owner);
         clusterManagerRemoveNodeFromList(importing, owner);
     }
-
     /* If there are multiple owners of the slot, we need to fix it
      * so that a single node is the owner and all the other nodes
      * are in importing state. Later the fix can be handled by one
@@ -4806,7 +4720,6 @@ static int clusterManagerFixOpenSlot(int slot) {
         }
     }
     int move_opts = CLUSTER_MANAGER_OPT_VERBOSE;
-
     /* Case 1: The slot is in migrating state in one node, and in
      *         importing state in 1 node. That's trivial to address. */
     if (listLength(migrating) == 1 && listLength(importing) == 1) {
@@ -4818,7 +4731,6 @@ static int clusterManagerFixOpenSlot(int slot) {
         move_opts |= CLUSTER_MANAGER_OPT_UPDATE;
         success = clusterManagerMoveSlot(src, dst, slot, move_opts, NULL);
     }
-
     /* Case 2: There are multiple nodes that claim the slot as importing,
      * they probably got keys about the slot after a restart so opened
      * the slot. In this case we just move all the keys to the owner
@@ -4849,7 +4761,6 @@ static int clusterManagerFixOpenSlot(int slot) {
             if (!success) goto cleanup;
         }
     }
-
     /* Case 3: The slot is in migrating state in one node but multiple
      * other nodes claim to be in importing state and don't have any key in
      * the slot. We search for the importing node having the same ID as
@@ -5523,8 +5434,7 @@ assign_replicas:
     }
     clusterManagerOptimizeAntiAffinity(ip_nodes, ip_count);
     clusterManagerShowNodes();
-    int force = 1;
-    if (confirmWithYes("Can I set the above configuration?", force)) {
+    if (confirmWithYes("Can I set the above configuration?")) {
         listRewind(cluster_manager.nodes, &li);
         while ((ln = listNext(&li)) != NULL) {
             clusterManagerNode *node = ln->value;
@@ -7813,7 +7723,7 @@ static void LRUTestMode(void) {
          * to fill the target instance easily. */
         start_cycle = mstime();
         long long hits = 0, misses = 0;
-        while(mstime() - start_cycle < LRU_CYCLE_PERIOD) {
+        while(mstime() - start_cycle < 1000) {
             /* Write cycle. */
             for (j = 0; j < LRU_CYCLE_PIPELINE_SIZE; j++) {
                 char val[6];
@@ -7934,13 +7844,6 @@ static void intrinsicLatencyMode(void) {
     }
 }
 
-static sds askPassword() {
-    linenoiseMaskModeEnable();
-    sds auth = linenoise("Please input password: ");
-    linenoiseMaskModeDisable();
-    return auth;
-}
-
 /*------------------------------------------------------------------------------
  * Program main()
  *--------------------------------------------------------------------------- */
@@ -7977,7 +7880,6 @@ int main(int argc, char **argv) {
     config.hotkeys = 0;
     config.stdinarg = 0;
     config.auth = NULL;
-    config.askpass = 0;
     config.user = NULL;
     config.eval = NULL;
     config.eval_ldb = 0;
@@ -8018,18 +7920,6 @@ int main(int argc, char **argv) {
     argv += firstarg;
 
     parseEnv();
-
-    if (config.askpass) {
-        config.auth = askPassword();
-    }
-
-#ifdef USE_OPENSSL
-    if (config.tls) {
-        ERR_load_crypto_strings();
-        SSL_load_error_strings();
-        SSL_library_init();
-    }
-#endif
 
     /* Cluster Manager mode */
     if (CLUSTER_MANAGER_MODE()) {
@@ -8133,4 +8023,3 @@ int main(int argc, char **argv) {
         return noninteractive(argc,convertToSds(argc,argv));
     }
 }
-

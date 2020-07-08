@@ -24,5 +24,4 @@ $TCLSH tests/test_helper.tcl \
 --single unit/moduleapi/blockonkeys \
 --single unit/moduleapi/scan \
 --single unit/moduleapi/datatype \
---single unit/moduleapi/auth \
 "${@}"

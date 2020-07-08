@@ -20,8 +20,7 @@ void *testrdb_type_load(RedisModuleIO *rdb, int encver) {
     long double ld = RedisModule_LoadLongDouble(rdb);
     if (RedisModule_IsIOError(rdb)) {
         RedisModuleCtx *ctx = RedisModule_GetContextFromIO(rdb);
-        if (str)
-            RedisModule_FreeString(ctx, str);
+        RedisModule_FreeString(ctx, str);
         return NULL;
     }
     /* Using the values only after checking for io errors. */
